@@ -39,107 +39,109 @@ def login_to_naver():
     except TimeoutException:
         print("Login elements did not load in time.")
 
-def scrape_posts(search_keyword, start_page=1, end_page=3):
+def scrape_posts(search_keywords, start_page=1, end_page=11):
     scraped_data = []
     filter_date = datetime(2024, 11, 1)  # Set the filter date to November 1, 2024
+    keywords = [kw.strip() for kw in search_keywords.split(',')]  # Split keywords by comma
 
-    try:
-        search_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//input[@name="query"]'))
-        )
-        search_input.clear()
-        search_input.send_keys(search_keyword)
+    for keyword in keywords:
+        try:
+            search_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '//input[@name="query"]'))
+            )
+            search_input.clear()
+            search_input.send_keys(keyword)
 
-        search_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//button[@onclick="searchBoard();return false;"]'))
-        )
-        search_button.click()
-        time.sleep(2)
+            search_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, '//button[@onclick="searchBoard();return false;"]'))
+            )
+            search_button.click()
+            time.sleep(2)
 
-        # Switch to the required iframe
-        WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#cafe_main")))
+            # Switch to the required iframe
+            WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#cafe_main")))
 
-        for current_page in range(start_page, end_page + 1):
-            print(f"Scraping page {current_page}...")
+            for current_page in range(start_page, end_page + 1):
+                print(f"Scraping page {current_page} for keyword '{keyword}'...")
 
-            try:
-                post_elements = driver.find_elements(By.XPATH, '//a[contains(@class, "article")]')
-                if not post_elements:
-                    print(f"No posts found on page {current_page}")
-                    break
-
-                for j in range(len(post_elements)):
+                try:
                     post_elements = driver.find_elements(By.XPATH, '//a[contains(@class, "article")]')
+                    if not post_elements:
+                        print(f"No posts found on page {current_page} for keyword '{keyword}'")
+                        break
 
-                    try:
-                        date_element_xpath = f'(//td[@class="td_date"])[{j+1}]'
-                        date_element = WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.XPATH, date_element_xpath))
-                        )
-                        date_text = date_element.text
-                        print(f"Post {j+1} has date: {date_text}")
+                    for j in range(len(post_elements)):
+                        post_elements = driver.find_elements(By.XPATH, '//a[contains(@class, "article")]')
 
-                        # Parse the date string to a datetime object
-                        post_date = datetime.strptime(date_text.strip(), "%Y.%m.%d.")
-                        
-                        # Check if the post date is from November 2024 onwards
-                        if post_date < filter_date:
-                            print(f"Skipping post {j+1} as it does not match the date filter (after November 2024)")
+                        try:
+                            date_element_xpath = f'(//td[@class="td_date"])[{j+1}]'
+                            date_element = WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located((By.XPATH, date_element_xpath))
+                            )
+                            date_text = date_element.text
+                            print(f"Post {j+1} has date: {date_text}")
+
+                            # Parse the date string to a datetime object
+                            post_date = datetime.strptime(date_text.strip(), "%Y.%m.%d.")
+                            
+                            # Check if the post date is from November 2024 onwards
+                            if post_date < filter_date:
+                                print(f"Skipping post {j+1} as it does not match the date filter (after November 2024)")
+                                continue
+
+                            # Extract the title directly from the anchor tag or child elements
+                            post_element = post_elements[j]
+                            title = post_element.text.strip()
+                            print(f"Scraping post {j+1}: {title}")
+
+                            # Click and proceed
+                            post_element.click()
+                            WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located((By.XPATH, '//div[contains(@class, "se-main-container")]'))
+                            )
+                            time.sleep(2)
+
+                            content_xpath = '//div[contains(@class, "se-main-container")]'
+                            content_element = WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located((By.XPATH, content_xpath))
+                            )
+                            content = content_element.text
+
+                            comments, replies = extract_comments()
+
+                            scraped_data.append({
+                                "Date": date_text,
+                                "Title": title,
+                                "Content": content,
+                                "Combined": f"{title} {content} " + " ".join(comments) + " " + " ".join(replies)
+                            })
+
+                            driver.back()
+                            WebDriverWait(driver, 10).until(
+                                EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#cafe_main"))
+                            )
+
+                        except (StaleElementReferenceException, TimeoutException, NoSuchElementException) as e:
+                            print(f"Error with post {j+1} on page {current_page}: {e}")
                             continue
 
-                        # Extract the title directly from the anchor tag or child elements
-                        post_element = post_elements[j]
-                        title = post_element.text.strip()
-                        print(f"Scraping post {j+1}: {title}")
-
-                        # Click and proceed
-                        post_element.click()
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.XPATH, '//div[contains(@class, "se-main-container")]'))
+                    next_page_link_xpath = f'//a[text()="{current_page + 1}"]'
+                    try:
+                        next_page_element = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, next_page_link_xpath))
                         )
+                        next_page_element.click()
                         time.sleep(2)
+                    except (TimeoutException, NoSuchElementException) as e:
+                        print(f"No more pages or error clicking next page (page {current_page}): {e}")
+                        break
 
-                        content_xpath = '//div[contains(@class, "se-main-container")]'
-                        content_element = WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.XPATH, content_xpath))
-                        )
-                        content = content_element.text
-
-                        comments, replies = extract_comments()
-
-                        scraped_data.append({
-                            "Date": date_text,
-                            "Title": title,
-                            "Content": content,
-                            "Combined": f"{title} {content} " + " ".join(comments) + " " + " ".join(replies)
-                        })
-
-                        driver.back()
-                        WebDriverWait(driver, 10).until(
-                            EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#cafe_main"))
-                        )
-
-                    except (StaleElementReferenceException, TimeoutException, NoSuchElementException) as e:
-                        print(f"Error with post {j+1} on page {current_page}: {e}")
-                        continue
-
-                next_page_link_xpath = f'//a[text()="{current_page + 1}"]'
-                try:
-                    next_page_element = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, next_page_link_xpath))
-                    )
-                    next_page_element.click()
-                    time.sleep(2)
                 except (TimeoutException, NoSuchElementException) as e:
-                    print(f"No more pages or error clicking next page (page {current_page}): {e}")
+                    print(f"Error with scraping on page {current_page}: {e}")
                     break
 
-            except (TimeoutException, NoSuchElementException) as e:
-                print(f"Error with scraping on page {current_page}: {e}")
-                break
-
-    except TimeoutException as e:
-        print(f"Error with initial search setup: {e}")
+        except TimeoutException as e:
+            print(f"Error with initial search setup for keyword '{keyword}': {e}")
 
     return scraped_data
 
@@ -162,10 +164,12 @@ def extract_comments():
 def analyze_with_gpt4(combined_texts):
     client = OpenAI(api_key=OpenAI.api_key)
     system_prompt = (
-        "당신은 감정 분석과 요약에 능통한 전문가입니다. "
-        "제공된 각 텍스트에 대해 감정 분류를 수행하세요 "
-        "(긍정적, 중립적, 부정적) 그리고 주요 포인트와 의견을 요약하여 "
-        "간단한 요약을 제공합니다."
+        """당신은 감정 분석과 요약에 능통한 전문가입니다. 
+        제공된 각 텍스트에 대해 감정 분류를 수행하세요.
+        "원더캠프" 직접적으로 관련된 내용만을 사용하여 요약합니다.
+        원더캠프가 들어가있는 글들만을 사용하여 요약합니다.
+        (긍정적, 중립적, 부정적) 그리고 주요 포인트와 의견을 요약하여 
+        간단한 요약을 제공합니다."""
     )
     
     summaries = []
@@ -202,7 +206,7 @@ def main():
         "https://cafe.naver.com/campingfirst",
         "https://cafe.naver.com/kzmkzmkzm/"
     ]
-    search_keyword = "원더캠프"
+    search_keywords = "원더캠프"  # Add more keywords separated by commas
 
     login_to_naver()  # Perform login once at the beginning
 
@@ -218,7 +222,7 @@ def main():
         driver.get(cafe_url.strip())
         
         # Scrape data
-        data = scrape_posts(search_keyword, start_page=1, end_page=3)
+        data = scrape_posts(search_keywords, start_page=1, end_page=3)
         all_data.extend(data)
 
     # Use GPT-4o to analyze sentiment and summarize

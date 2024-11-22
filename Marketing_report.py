@@ -13,8 +13,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 from dotenv import load_dotenv
 from collections import defaultdict
 from datetime import datetime
-from docx import Document  # Added for .docx handling
-from docx.shared import Inches
+from docx import Document
 import time
 
 # Load environment variables from .env file
@@ -23,7 +22,7 @@ load_dotenv()
 # Credentials
 naver_marketing_id = os.getenv("NAVER_MARKETING_ID")
 naver_marketing_password = os.getenv("NAVER_MARKETING_PASSWORD")
-OpenAI.api_key = os.getenv("OPENAI_API_KEY")  # Ensure your OpenAI API key is in the .env file
+OpenAI.api_key = os.getenv("OPENAI_API_KEY")
 
 # Set up WebDriver
 options = Options()
@@ -52,9 +51,8 @@ def login_to_naver():
     except TimeoutException:
         print("Login elements did not load in time.")
 
-def scrape_posts(search_keyword, start_page=1, end_page=3):
+def scrape_posts(search_keyword, start_page=1, end_page=3, processed_titles=set(), start_date=None, end_date=None):
     scraped_data = []
-    filter_date = datetime(2024, 11, 1)  # Set the filter date to November 1, 2024
 
     try:
         search_input = WebDriverWait(driver, 10).until(
@@ -71,7 +69,14 @@ def scrape_posts(search_keyword, start_page=1, end_page=3):
 
         WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, "iframe#cafe_main")))
 
-        for current_page in range(start_page, end_page + 1):
+        if start_date:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_date = datetime.strptime(end_date, "%Y-%m-%d")
+
+        current_page = start_page
+
+        while current_page <= end_page:
             print(f"Scraping page {current_page}...")
 
             try:
@@ -97,12 +102,18 @@ def scrape_posts(search_keyword, start_page=1, end_page=3):
                         else:
                             post_date = datetime.strptime(date_text.strip(), "%Y.%m.%d.")
 
-                        if post_date < filter_date:
-                            print(f"Skipping post {j+1} as it does not match the date filter (after November 2024)")
+                        if (start_date and post_date < start_date) or (end_date and post_date > end_date):
+                            print(f"Skipping post {j+1} as it does not match the date filter")
                             continue
 
                         post_element = post_elements[j]
                         title = post_element.text.strip()
+
+                        # Skip posts already processed
+                        if title in processed_titles:
+                            print(f"Skipping post {j+1} with title '{title}' as it is already processed")
+                            continue
+
                         print(f"Scraping post {j+1}: {title}")
 
                         post_element.click()
@@ -118,6 +129,9 @@ def scrape_posts(search_keyword, start_page=1, end_page=3):
                         content = content_element.text
 
                         comments, replies = extract_comments()
+
+                        # Add post title to processed_titles to avoid duplicates
+                        processed_titles.add(title)
 
                         scraped_data.append({
                             "Date": post_date.strftime("%Y-%m-%d %H:%M"),
@@ -135,16 +149,30 @@ def scrape_posts(search_keyword, start_page=1, end_page=3):
                         print(f"Error with post {j+1} on page {current_page}: {e}")
                         continue
 
-                next_page_link_xpath = f'//a[text()="{current_page + 1}"]'
-                try:
-                    next_page_element = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, next_page_link_xpath))
-                    )
-                    next_page_element.click()
-                    time.sleep(2)
-                except (TimeoutException, NoSuchElementException) as e:
-                    print(f"No more pages or error clicking next page (page {current_page}): {e}")
-                    break
+                # Determine next page or next button actions
+                if current_page % 10 == 0 and current_page < end_page:
+                    next_button_xpath = '//a[@class="pgR"]/span[@class="m-tcol-c"][text()="다음"]'
+                    try:
+                        next_button_element = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, next_button_xpath))
+                        )
+                        next_button_element.click()
+                        time.sleep(2)
+                    except (TimeoutException, NoSuchElementException) as e:
+                        print(f"No more pages or error clicking next button (page {current_page}): {e}")
+                        break
+                elif current_page < end_page:
+                    next_page_link_xpath = f'//a[text()="{current_page + 1}"]'
+                    try:
+                        next_page_element = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, next_page_link_xpath))
+                        )
+                        next_page_element.click()
+                        time.sleep(2)
+                    except (TimeoutException, NoSuchElementException) as e:
+                        print(f"No more pages or error clicking next page (page {current_page}): {e}")
+                        break
+                current_page += 1
 
             except (TimeoutException, NoSuchElementException) as e:
                 print(f"Error with scraping on page {current_page}: {e}")
@@ -204,12 +232,14 @@ def analyze_with_gpt4o(all_data, product_category_mapping):
             summary = chat_completion.choices[0].message.content.strip()
             summaries.append(summary)
 
-            # Count product mentions per category
+            # Count product mentions per category: each product is counted only once per post
+            mentioned_products = set()
             for product, category in product_category_mapping.items():
-                occurrences = text.count(product)
-                if occurrences > 0:
-                    product_count[product] += occurrences
-                    category_count[category] += occurrences
+                product_regex = re.compile(re.escape(product.replace(" ", "")), re.IGNORECASE)
+                if product_regex.search(text.replace(" ", "")) and product not in mentioned_products:
+                    mentioned_products.add(product)
+                    product_count[product] += 1
+                    category_count[category] += 1
 
             # Extract sentiment from the structured response
             if "감정: 긍정적" in summary:
@@ -227,35 +257,40 @@ def analyze_with_gpt4o(all_data, product_category_mapping):
 
     return summaries, dict(product_count), dict(category_count), dict(sentiment_count), total_posts
 
-def write_summary_to_docx(product_count, category_count, sentiment_count, total_posts, summaries, output_file):
+def write_summary_to_docx(product_count, category_count, sentiment_count, total_posts, all_data, summaries, output_file):
+    """
+    Writes a summarized analysis of the data and sentiment to a DOCX file.
+    """
     doc = Document()
 
-    # Add a title
+    # Add a title for the document
     doc.add_heading('Sentiment Analysis Summary', level=1)
 
-    # Create table for product mentions
+    # Create table for product mentions (sorted alphabetically by product name)
     doc.add_heading('Product Mentions', level=2)
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
     hdr_cells = table.rows[0].cells
     hdr_cells[0].text = 'Product'
     hdr_cells[1].text = 'Count'
-    for product, count in product_count.items():
+    
+    for product in sorted(product_count):
         row_cells = table.add_row().cells
         row_cells[0].text = product
-        row_cells[1].text = str(count)
+        row_cells[1].text = str(product_count[product])
 
-    # Create table for category mentions
+    # Create table for category mentions (sorted alphabetically by category name)
     doc.add_heading('Category Mentions', level=2)
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
     hdr_cells = table.rows[0].cells
     hdr_cells[0].text = 'Category'
     hdr_cells[1].text = 'Total Mentions'
-    for category, count in category_count.items():
+    
+    for category in sorted(category_count):
         row_cells = table.add_row().cells
         row_cells[0].text = category
-        row_cells[1].text = str(count)
+        row_cells[1].text = str(category_count[category])
 
     # Create table for sentiment analysis
     doc.add_heading('Sentiment Analysis', level=2)
@@ -277,9 +312,11 @@ def write_summary_to_docx(product_count, category_count, sentiment_count, total_
     row_cells[0].text = 'Total Posts'
     row_cells[1].text = str(total_posts)
 
-    # Add detailed summaries at the end
+    # Add detailed summaries with titles at the end
     doc.add_heading('Detailed Summaries', level=2)
-    for summary in summaries:
+    for item, summary in zip(all_data, summaries):
+        # Add the post title as a heading
+        doc.add_heading(f"Title: {item['Title']}", level=3)
         doc.add_paragraph(summary)
         doc.add_paragraph("\n")  # Space between summaries
 
@@ -292,29 +329,51 @@ def main():
         "https://cafe.naver.com/campingfirst",
     ]
     
-    search_keywords = "카즈미"  # Multiple keywords separated by commas
-    search_keywords_list = search_keywords.split(',')
+    # Example with multiple keywords - ensure they are split correctly
+    search_keywords = "'카즈미', 'KZM', 'KZM OUTDOOR'"
+    search_keywords_list = [kw.strip().strip("'") for kw in search_keywords.split(',')]
 
-    login_to_naver()  # Perform login once at the beginning
+    login_to_naver()
 
     all_data = []
+    processed_titles = set()  # Set to keep track of processed post titles
+
+    start_date = "2024-11-01"  # Example start date
+    end_date = "2024-11-30"    # Example end date
 
     for keyword in search_keywords_list:
         for idx, cafe_url in enumerate(cafe_urls):
+            print(f"Searching for keyword: {keyword} in cafe: {cafe_url}")
             if idx > 0:
                 driver.execute_script("window.open('');")
                 driver.switch_to.window(driver.window_handles[-1])
 
             driver.get(cafe_url.strip())
             
-            data = scrape_posts(keyword.strip(), start_page=1, end_page=3)
+            # Scrape posts for each keyword individually
+            data = scrape_posts(
+                search_keyword=keyword,
+                start_page=1,
+                end_page=22,
+                processed_titles=processed_titles,
+                start_date=start_date,
+                end_date=end_date
+            )
             all_data.extend(data)
 
-    excel_file_path = r"C:\Users\KZM\Desktop\AICC\playauto\product\items.xls"
+    # Load product category mapping from Excel
+    excel_file_path = r"C:\Users\jung\Desktop\AICC\playauto\product\items.xls"
     product_category_mapping = extract_product_info(excel_file_path)
-    summaries, product_count, category_count, sentiment_count, total_posts = analyze_with_gpt4o(all_data, product_category_mapping)
+    
+    # Analyze scraped data with GPT-4o
+    summaries, product_count, category_count, sentiment_count, total_posts = analyze_with_gpt4o(
+        all_data, product_category_mapping
+    )
 
-    write_summary_to_docx(product_count, category_count, sentiment_count, total_posts, summaries, 'summary_results.docx')
+    # Write summarized analysis to a DOCX file
+    write_summary_to_docx(
+        product_count, category_count, sentiment_count, total_posts, all_data, summaries, 'summary_results.docx'
+    )
     print("Summaries have been generated and saved.")
 
 if __name__ == "__main__":
